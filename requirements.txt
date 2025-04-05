@@ -1,0 +1,9 @@
+ipykernel
+pandas
+numpy
+seaborn
+scipy
+bleak
+solara
+plotly-express
+anywidget
