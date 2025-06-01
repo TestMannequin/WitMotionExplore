@@ -98,10 +98,9 @@ class DeviceModel:
     async def _sendDataLoop(self):
         """Background task that sends register read commands periodically."""
         while self.isOpen and self.client and self.client.is_connected:
-            await self.readReg(0x3A)
-            await asyncio.sleep(0.1)
+            #await self.readReg(0x3A)  don't need magentomeer
             await self.readReg(0x51)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.1)  # 10ms = 100 Hz
 
     # -----------------------------
     #      Notification Callback
@@ -135,7 +134,7 @@ class DeviceModel:
     def processData(self, packet):
         # For flag 0x61: acceleration, angular velocity, and angle data.
         if packet[1] == 0x61:
-            #log_packet(packet)
+            log_packet(packet)
             # Use correct low-byte-first decoding:
             # Extract raw acceleration values (little-endian)
             ax_raw = self.getSignInt16(packet[3] << 8 | packet[2])
@@ -239,3 +238,10 @@ class DeviceModel:
     async def save(self):
         cmd = self.get_writeBytes(0x00, 0x0000)
         await self.sendData(cmd)
+
+    async def set_sampling_rate(self, hz_code=0x09):  # default to 100 Hz
+        await self.unlock()
+        await asyncio.sleep(0.1)
+        await self.writeReg(0x03, hz_code)
+        await asyncio.sleep(0.1)
+        await self.save()

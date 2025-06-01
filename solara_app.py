@@ -5,7 +5,8 @@ import numpy as np
 
 import plotly.graph_objs as go
 from solara import FigurePlotly
-
+import csv
+from datetime import datetime
 
 connected_device          = solara.reactive(False)
 device_model              = solara.reactive(None)
@@ -24,6 +25,10 @@ status                    = solara.reactive("Idle")
 
 _last_plot_update = [0.0]
 
+# Reactive state for recording
+recording = solara.reactive(False)
+recording_file = solara.reactive(None)
+
 # ---------- data pump ---------- #
 def update_data(device: DeviceModel):
     ax = device.get("AccX") or 0.0
@@ -33,9 +38,23 @@ def update_data(device: DeviceModel):
     q1 = device.get("Q1")  or 0.0
     q2 = device.get("Q2")  or 0.0
     q3 = device.get("Q3")  or 0.0
+    AngX = device.get("AngX")  or 0.0
+    AngY = device.get("AngY")  or 0.0
+    AngZ = device.get("AngZ")  or 0.0 
+    AsX = device.get("AsX")  or 0.0
+    AsY = device.get("AsY")  or 0.0
+    AsZ = device.get("AsZ")  or 0.0 
 
     now = time.time()
-    accel_history.append((now, ax, ay, az, q0, q1, q2, q3))
+    accel_history.append((now, ax, ay, az,AsX,AsY,AsZ, q0, q1, q2, q3))
+
+
+    # Write to CSV if recording 
+    if recording.value and recording_file.value:
+        writer = csv.writer(recording_file.value)
+        writer.writerow([now, ax, ay, az, AngX, AngY, AngZ, q0, q1, q2, q3])
+        recording_file.value.flush()
+
 
     # push fresh values for UI every 0.1 s
     if now - _last_plot_update[0] > 0.1:
@@ -43,7 +62,7 @@ def update_data(device: DeviceModel):
         quaternion.set((round(q0, 3), round(q1, 3), round(q2, 3), round(q3, 3)))
         accel_history_reactive.set(list(accel_history))
         _last_plot_update[0] = now
-# -------------------------------- #
+
 
 async def scan_devices():
     status.set("Scanning for devices…")
@@ -63,8 +82,10 @@ async def connect():
     try:
         dm = DeviceModel("MyBle5.0", selected_device.value, update_data)
         await dm.openDevice()
+        await dm.set_sampling_rate(0x09)  # set to 100 Hz
         device_model.set(dm)
         connected_device.set(True)
+        
         status.set("Connected.")
     except Exception as e:
         status.set(f"Connection failed: {e}")
@@ -79,88 +100,96 @@ async def calibrate_acceleration():
     except Exception as e:
         status.set(f"Calibration failed: {e}")
 
-# ---------- plotting component ---------- #
-def _make_figure():
-    fig = Figure(figsize=(10, 4))
-    ax1 = fig.subplots()
-    acc_lines = [
-        ax1.plot([], [], label="AccX")[0],
-        ax1.plot([], [], label="AccY", linestyle="--")[0],
-        ax1.plot([], [], label="AccZ", linestyle=":")[0],
-    ]
-    ax1.set_xlabel("Time (s)")
-    ax1.set_ylabel("Acceleration (m/s²)")
-    ax1.grid(True)
-    ax1.legend(loc="upper left")
+# Record/Stop Button
+def toggle_recording():
+    if not recording.value:
+        # Start recording
+        filename = datetime.now().strftime("imu_logs/%Y%m%d_%H%M%S.csv")
+        f = open(filename, "w", newline="")
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "AccX", "AccY", "AccZ","AngX","AngY","AngZ","AsX", "AsY", "AsZ", "Q0", "Q1", "Q2", "Q3"])
+        recording_file.set(f)
+        recording.set(True)
+        status.set(f"Recording to {filename}")
+    else:
+        # Stop recording
+        f = recording_file.value
+        if f:
+            f.close()
+        recording_file.set(None)
+        recording.set(False)
+        status.set("Recording stopped.")
 
-    ax2 = ax1.twinx()
-    quat_lines = [
-        ax2.plot([], [], label="Q0", alpha=.4)[0],
-        ax2.plot([], [], label="Q1", alpha=.4)[0],
-        ax2.plot([], [], label="Q2", alpha=.4)[0],
-        ax2.plot([], [], label="Q3", alpha=.4)[0],
-    ]
-    ax2.set_ylabel("Quaternion")
-    ax2.legend(loc="upper right")
-    return fig, ax1, ax2, acc_lines, quat_lines
+
 
 
 @solara.component
 def PlotData():
     history = accel_history_reactive.value
-    win     = plot_time_window.value
+    win = plot_time_window.value
 
-    if not history:
-        solara.Markdown("No data yet.")
+    if not history or len(history) < 2:
+        solara.Markdown("Waiting for enough data to plot...")
         return
 
-    # unpack history
-    times, ax, ay, az, q0, q1, q2, q3 = map(np.array, zip(*history))
-    times -= times[0]  # relative timestamps
+    try:
+        # Unpack and window the data
+        times, ax, ay, az, q0, q1, q2, q3 = map(np.array, zip(*history))
+        times -= times[0]
 
-    # limit time window
-    keep = times >= times[-1] - win
-    times, ax, ay, az, q0, q1, q2, q3 = (arr[keep] for arr in (times, ax, ay, az, q0, q1, q2, q3))
+        keep = times >= times[-1] - win
+        times, ax, ay, az, q0, q1, q2, q3 = (arr[keep] for arr in (times, ax, ay, az, q0, q1, q2, q3))
 
-    fig = go.Figure()
+        if len(times) < 2:
+            solara.Markdown("Not enough data after filtering.")
+            return
 
-    # Acceleration
-    fig.add_trace(go.Scatter(x=times, y=ax, mode="lines", name="AccX"))
-    fig.add_trace(go.Scatter(x=times, y=ay, mode="lines", name="AccY"))
-    fig.add_trace(go.Scatter(x=times, y=az, mode="lines", name="AccZ"))
+        # Create the plot
+        fig = go.Figure()
 
-    # Quaternion (secondary Y axis)
-    for data, label, color in zip([q0, q1, q2, q3], ["Q0", "Q1", "Q2", "Q3"], ["gray", "blue", "green", "red"]):
-        fig.add_trace(go.Scatter(x=times, y=data, name=label, yaxis="y2", line=dict(color=color, dash="dot")))
+        fig.add_trace(go.Scatter(x=times, y=ax, mode="lines", name="AccX"))
+        fig.add_trace(go.Scatter(x=times, y=ay, mode="lines", name="AccY"))
+        fig.add_trace(go.Scatter(x=times, y=az, mode="lines", name="AccZ"))
 
-    fig.update_layout(
-        xaxis=dict(title="Time (s)"),
-        yaxis=dict(title="Acceleration (m/s²)"),
-        yaxis2=dict(title="Quaternion", overlaying="y", side="right"),
-        legend=dict(orientation="h"),
-        margin=dict(t=30, b=30),
-    )
+        for data, label, color in zip([q0, q1, q2, q3], ["Q0", "Q1", "Q2", "Q3"], ["gray", "blue", "green", "red"]):
+            fig.add_trace(go.Scatter(x=times, y=data, name=label, yaxis="y2", line=dict(color=color, dash="dot")))
 
-    FigurePlotly(fig)
+        fig.update_layout(
+            xaxis=dict(title="Time (s)"),
+            yaxis=dict(title="Acceleration (m/s²)"),
+            yaxis2=dict(title="Quaternion", overlaying="y", side="right"),
+            legend=dict(orientation="h"),
+            margin=dict(t=30, b=30),
+        )
+
+        FigurePlotly(fig)
+
+    except Exception as e:
+        solara.Markdown(f"⚠️ **Plot error**: {str(e)}")
 
 @solara.component
 def Page():
-    solara.Title("WT901BLE5.0 Accelerometer Debug App")
-    with solara.Column():
-        solara.Markdown("## Bluetooth Devices")
-        solara.Button("Scan Devices", on_click=lambda: asyncio.create_task(scan_devices()))
+    with solara.AppBar():
+        solara.lab.ThemeToggle()
+    with solara.Sidebar():
+        with solara.Card("Device Setup") as main:        
+            solara.Markdown("## Bluetooth Devices")
+            solara.Button("Scan Devices", on_click=lambda: asyncio.create_task(scan_devices()))
 
-        if devices.value:
-            options = {f"{d.name} ({d.address})": d for d in devices.value}
-            def on_select(label):
-                selected_device.set(options[label])
-                status.set(f"Selected: {label}")
-            solara.Select(label="Select Device", values=list(options.keys()), on_value=on_select)
+            if devices.value:
+                options = {f"{d.name} ({d.address})": d for d in devices.value}
+                def on_select(label):
+                    selected_device.set(options[label])
+                    status.set(f"Selected: {label}")
+                solara.Select(label="Select Device", values=list(options.keys()), on_value=on_select)
 
-        if selected_device.value and not connected_device.value:
-            solara.Button("Connect", on_click=lambda: asyncio.create_task(connect()))
+            if selected_device.value and not connected_device.value:
+                solara.Button("Connect", on_click=lambda: asyncio.create_task(connect()))
 
-        if connected_device.value:
+
+    if connected_device.value:
+        
+        with solara.Card("Connected Device") as main:  
             solara.Markdown("## IMU Data")
             ax, ay, az = acceleration.value
             q0, q1, q2, q3 = quaternion.value
@@ -169,7 +198,13 @@ def Page():
 
             solara.Button("Calibrate Accelerometer", on_click=lambda: asyncio.create_task(calibrate_acceleration()))
             solara.SliderFloat("Time Window (s)", value=plot_time_window, min=1, max=60, step=1)
+            # Display appropriate button
+            button_label = "Stop Recording" if recording.value else "Start Recording"
+            solara.Button(button_label, on_click=toggle_recording)
+            #PlotData()
 
-            PlotData()
+    else:
+        solara.Info("Not Connected")        
+
 
         solara.Markdown(f"### Status: {status.value}")
